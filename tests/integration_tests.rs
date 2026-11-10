@@ -82,3 +82,124 @@ fn test_checksum_corruption_detection() -> Result<()> {
     let _ = fs::remove_file(&output);
     Ok(())
 }
+
+use zipnolo::{
+    compress_chunk, compress_file_with_progress, compress_folder_with_progress,
+    decompress_chunk_into, decompress_file_with_progress, default_same_dir,
+    resolve_compress_destination, resolve_decompress_destination,
+};
+
+#[test]
+fn test_brotli_significantly_smaller_than_lz4_and_incompressible_raw_bypass() -> Result<()> {
+    let sample_code = include_bytes!("../src/archiver.rs");
+    let brotli_comp = compress_chunk(sample_code, Algorithm::Brotli)?;
+    let lz4_comp = compress_chunk(sample_code, Algorithm::Lz4)?;
+    assert!(
+        brotli_comp.len() < lz4_comp.len(),
+        "Expected Brotli ({}) to be smaller than LZ4 ({})",
+        brotli_comp.len(),
+        lz4_comp.len()
+    );
+    let mut restored = vec![0u8; sample_code.len()];
+    decompress_chunk_into(&brotli_comp, &mut restored, Algorithm::Brotli)?;
+    assert_eq!(restored, sample_code);
+
+    let mut rng_state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let random_data: Vec<u8> = (0..65536)
+        .map(|_| {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            (rng_state & 0xFF) as u8
+        })
+        .collect();
+    let raw_bypassed = compress_chunk(&random_data, Algorithm::Brotli)?;
+    assert!(raw_bypassed.len() <= random_data.len());
+    let mut restored_rand = vec![0u8; random_data.len()];
+    decompress_chunk_into(&raw_bypassed, &mut restored_rand, Algorithm::Brotli)?;
+    assert_eq!(restored_rand, random_data);
+
+    Ok(())
+}
+
+#[test]
+fn test_destination_folder_and_default_same_dir() -> Result<()> {
+    let base_dir = std::env::temp_dir().join("zipnolo_same_dir_test");
+    let src_dir = base_dir.join("src_dir");
+    let restored_dir = base_dir.join("restored_out_dir");
+
+    let _ = fs::remove_dir_all(&base_dir);
+    fs::create_dir_all(&src_dir)?;
+
+    let src_file = src_dir.join("demo_payload.dat");
+    let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 199) as u8).collect();
+    fs::write(&src_file, &payload)?;
+
+    let same_dir = default_same_dir(&src_file);
+    assert_eq!(same_dir, fs::canonicalize(&src_dir)?);
+
+    let archive_path = resolve_compress_destination(&src_file, &same_dir)?;
+    assert_eq!(
+        archive_path,
+        fs::canonicalize(&src_dir)?.join("demo_payload.dat.nolo")
+    );
+    compress_file_with_progress(&src_file, &archive_path, Algorithm::Brotli, 128 * 1024, false)?;
+
+    let restored_path = resolve_decompress_destination(&archive_path, &restored_dir)?;
+    assert_eq!(restored_path, restored_dir.join("demo_payload.dat"));
+    decompress_file_with_progress(&archive_path, &restored_path, false)?;
+
+    assert_eq!(fs::read(&restored_path)?, payload);
+
+    let _ = fs::remove_dir_all(&base_dir);
+    Ok(())
+}
+
+#[test]
+fn test_folder_compress_and_decompress_roundtrip() -> Result<()> {
+    let base_dir = std::env::temp_dir().join("zipnolo_folder_roundtrip_test");
+    let src_folder = base_dir.join("my_project");
+    let sub_a = src_folder.join("src").join("nested");
+    let empty_dir = src_folder.join("empty_subdir");
+    let extract_dir = base_dir.join("extracted");
+
+    let _ = fs::remove_dir_all(&base_dir);
+    fs::create_dir_all(&sub_a)?;
+    fs::create_dir_all(&empty_dir)?;
+
+    let file1_bytes: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();
+    let file2_bytes = b"Hello from nested directory inside zipnolo folder archive!".to_vec();
+    fs::write(src_folder.join("root_data.bin"), &file1_bytes)?;
+    fs::write(sub_a.join("code.rs"), &file2_bytes)?;
+    fs::write(src_folder.join("empty.txt"), b"")?;
+
+    let same_dir = default_same_dir(&src_folder);
+    let archive_path = resolve_compress_destination(&src_folder, &same_dir)?;
+    assert_eq!(
+        archive_path,
+        fs::canonicalize(&base_dir)?.join("my_project.nolo")
+    );
+
+    compress_folder_with_progress(
+        &src_folder,
+        &archive_path,
+        Algorithm::Brotli,
+        128 * 1024,
+        false,
+    )?;
+
+    let restored_folder = resolve_decompress_destination(&archive_path, &extract_dir)?;
+    assert_eq!(restored_folder, extract_dir.join("my_project"));
+    decompress_file_with_progress(&archive_path, &restored_folder, false)?;
+
+    assert_eq!(fs::read(restored_folder.join("root_data.bin"))?, file1_bytes);
+    assert_eq!(
+        fs::read(restored_folder.join("src").join("nested").join("code.rs"))?,
+        file2_bytes
+    );
+    assert_eq!(fs::read(restored_folder.join("empty.txt"))?.len(), 0);
+    assert!(restored_folder.join("empty_subdir").is_dir());
+
+    let _ = fs::remove_dir_all(&base_dir);
+    Ok(())
+}

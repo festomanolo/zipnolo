@@ -124,3 +124,76 @@ pub fn compress_file_with_progress(
 
     Ok(())
 }
+
+use crate::codec::decompress_chunk_into;
+use crate::format::read_archive_footer;
+use memmap2::MmapMut;
+use std::fs::OpenOptions;
+
+pub fn decompress_file(archive_path: &Path, output_path: &Path) -> Result<()> {
+    decompress_file_with_progress(archive_path, output_path, false)
+}
+
+pub fn decompress_file_with_progress(
+    archive_path: &Path,
+    output_path: &Path,
+    show_progress: bool,
+) -> Result<()> {
+    let mut archive_file = File::open(archive_path)
+        .with_context(|| format!("Failed to open archive: {}", archive_path.display()))?;
+    let parsed = read_archive_footer(&mut archive_file)?;
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create destination folder: {}", parent.display())
+            })?;
+        }
+    }
+
+    let out_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+
+    let progress = ProgressBar::new("Decompressing", parsed.orig_size, show_progress);
+
+    if parsed.orig_size == 0 {
+        progress.finish();
+        return Ok(());
+    }
+    out_file.set_len(parsed.orig_size)?;
+
+    let in_mmap = unsafe { Mmap::map(&archive_file)? };
+    let mut out_mmap = unsafe { MmapMut::map_mut(&out_file)? };
+
+    out_mmap
+        .par_chunks_mut(parsed.chunk_size)
+        .enumerate()
+        .try_for_each(|(i, out_chunk)| -> Result<()> {
+            let (offset, comp_size, expected_hash) = parsed.block_meta[i];
+            let end_offset = offset
+                .checked_add(comp_size)
+                .filter(|&end| end <= in_mmap.len())
+                .context("Compressed block offset out of bounds")?;
+            let compressed_slice = &in_mmap[offset..end_offset];
+
+            decompress_chunk_into(compressed_slice, out_chunk, parsed.algo)?;
+
+            let actual_hash = xxh3_64(out_chunk);
+            if actual_hash != expected_hash {
+                bail!("Block {} failed XXH3 checksum verification!", i);
+            }
+            progress.add(out_chunk.len() as u64);
+            Ok(())
+        })?;
+
+    out_mmap.flush()?;
+    drop(out_mmap);
+    drop(in_mmap);
+    progress.finish();
+    Ok(())
+}

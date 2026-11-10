@@ -243,3 +243,25 @@ fn test_folder_decompress_overwrites_readonly_git_objects() -> Result<()> {
     let _ = fs::remove_dir_all(&base_dir);
     Ok(())
 }
+
+#[test]
+fn test_archive_info_flow_on_file_and_folder() -> Result<()> {
+    let base_dir = std::env::temp_dir().join("zipnolo_info_flow_test");
+    let src_folder = base_dir.join("sample_folder");
+    let _ = fs::remove_dir_all(&base_dir);
+    fs::create_dir_all(&src_folder)?;
+
+    let file_path = src_folder.join("hello.txt");
+    fs::write(&file_path, b"zipnolo metadata inspection payload")?;
+
+    let file_archive = base_dir.join("hello.txt.nolo");
+    compress_file(&file_path, &file_archive, Algorithm::Brotli, 64 * 1024)?;
+    zipnolo::cli::execute_info_flow(&file_archive)?;
+
+    let folder_archive = base_dir.join("sample_folder.nolo");
+    compress_folder_with_progress(&src_folder, &folder_archive, Algorithm::Brotli, 64 * 1024, false)?;
+    zipnolo::cli::execute_info_flow(&folder_archive)?;
+
+    let _ = fs::remove_dir_all(&base_dir);
+    Ok(())
+}

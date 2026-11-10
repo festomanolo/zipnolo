@@ -292,3 +292,108 @@ pub fn compress_folder_with_progress(
 
     Ok(total_stream_size)
 }
+
+use std::io;
+
+/// Helper reader that streams decompressed blocks in order from the parallel decompression channel.
+pub struct ParallelBlockReader {
+    pub rx: crossbeam_channel::Receiver<Result<(usize, Vec<u8>)>>,
+    pub reorder: BTreeMap<usize, Vec<u8>>,
+    pub next_idx: usize,
+    pub current_buf: Vec<u8>,
+    pub current_pos: usize,
+    pub progress: ProgressBar,
+}
+
+impl Read for ParallelBlockReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        while self.current_pos >= self.current_buf.len() {
+            if let Some(ready) = self.reorder.remove(&self.next_idx) {
+                self.progress.add(ready.len() as u64);
+                self.current_buf = ready;
+                self.current_pos = 0;
+                self.next_idx += 1;
+                break;
+            }
+            match self.rx.recv() {
+                Ok(Ok((idx, data))) => {
+                    self.reorder.insert(idx, data);
+                }
+                Ok(Err(e)) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+
+        let avail = self.current_buf.len() - self.current_pos;
+        let to_copy = avail.min(out.len());
+        out[..to_copy]
+            .copy_from_slice(&self.current_buf[self.current_pos..self.current_pos + to_copy]);
+        self.current_pos += to_copy;
+        Ok(to_copy)
+    }
+}
+
+pub fn unpack_folder_stream(reader: &mut impl Read, target_folder: &Path) -> Result<()> {
+    fs::create_dir_all(target_folder)?;
+
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic)?;
+    if &magic != FOLDER_CONTAINER_MAGIC {
+        bail!("Invalid folder container header inside NOLO archive");
+    }
+
+    let mut count_bytes = [0u8; 8];
+    reader.read_exact(&mut count_bytes)?;
+    let count = u64::from_le_bytes(count_bytes);
+
+    let mut copy_buf = vec![0u8; 256 * 1024];
+
+    for _ in 0..count {
+        let mut kind = [0u8; 1];
+        reader.read_exact(&mut kind)?;
+
+        let mut path_len_bytes = [0u8; 4];
+        reader.read_exact(&mut path_len_bytes)?;
+        let path_len = u32::from_le_bytes(path_len_bytes) as usize;
+
+        let mut path_buf = vec![0u8; path_len];
+        reader.read_exact(&mut path_buf)?;
+        let rel_str = std::str::from_utf8(&path_buf)?;
+
+        let mut safe_rel = PathBuf::new();
+        for part in rel_str.split('/') {
+            if !part.is_empty() && part != "." && part != ".." {
+                safe_rel.push(part);
+            }
+        }
+        let full_out = target_folder.join(safe_rel);
+
+        let mut size_bytes = [0u8; 8];
+        reader.read_exact(&mut size_bytes)?;
+        let file_size = u64::from_le_bytes(size_bytes);
+
+        if kind[0] == 0 {
+            fs::create_dir_all(&full_out)?;
+        } else {
+            if let Some(parent) = full_out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let out_f = File::create(&full_out)?;
+            let mut writer = BufWriter::with_capacity(256 * 1024, out_f);
+            let mut remaining = file_size;
+            while remaining > 0 {
+                let to_read = (remaining as usize).min(copy_buf.len());
+                reader.read_exact(&mut copy_buf[..to_read])?;
+                writer.write_all(&copy_buf[..to_read])?;
+                remaining -= to_read as u64;
+            }
+            writer.flush()?;
+            if kind[0] == 2 {
+                let _ = set_executable(&full_out);
+            }
+        }
+    }
+    Ok(())
+}

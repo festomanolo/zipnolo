@@ -1,14 +1,15 @@
 use crate::algorithm::Algorithm;
-use crate::codec::compress_chunk;
+use crate::codec::{compress_chunk, decompress_chunk_into};
 use crate::constants::START_MAGIC;
-use crate::format::{write_nolo_footer, BlockEntry, CompressedBlock};
+use crate::folder::{unpack_folder_stream, ParallelBlockReader};
+use crate::format::{read_archive_footer, write_nolo_footer, BlockEntry, CompressedBlock};
 use crate::progress::ProgressBar;
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::bounded;
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use xxhash_rust::xxh3::xxh3_64;
@@ -37,7 +38,6 @@ pub fn compress_file_with_progress(
         .with_context(|| format!("Failed to open input file: {}", input_path.display()))?;
     let file_size = in_file.metadata()?.len();
 
-    // Cross-platform path normalization: store purely as a UTF-8 .file_name() without directory prefixes
     let file_name = input_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -55,20 +55,16 @@ pub fn compress_file_with_progress(
     let out_file = File::create(output_path)
         .with_context(|| format!("Failed to create output archive: {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
-
-    // 1. Write Start Magic
     writer.write_all(START_MAGIC)?;
 
     let mut block_table: Vec<BlockEntry> = Vec::new();
     let progress = ProgressBar::new("Compressing", file_size, show_progress);
 
-    // Cross-platform safety: Only memory-map if file_size > 0
     if file_size > 0 {
         let mmap = unsafe { Mmap::map(&in_file).context("Failed to memory-map input file")? };
         let num_blocks = mmap.len().div_ceil(chunk_size);
         block_table.reserve(num_blocks);
 
-        // Bounded channel limits memory usage to (2 * CPU cores) blocks in flight
         let queue_cap = (rayon::current_num_threads() * 2).max(4);
         let (tx, rx) = bounded::<Result<CompressedBlock>>(queue_cap);
 
@@ -108,7 +104,6 @@ pub fn compress_file_with_progress(
             Ok(())
         })?;
 
-        // Explicitly drop Mmap before closing in_file for Windows file-locking compatibility
         drop(mmap);
     }
 
@@ -125,11 +120,6 @@ pub fn compress_file_with_progress(
     Ok(())
 }
 
-use crate::codec::decompress_chunk_into;
-use crate::format::read_archive_footer;
-use memmap2::MmapMut;
-use std::fs::OpenOptions;
-
 pub fn decompress_file(archive_path: &Path, output_path: &Path) -> Result<()> {
     decompress_file_with_progress(archive_path, output_path, false)
 }
@@ -142,6 +132,66 @@ pub fn decompress_file_with_progress(
     let mut archive_file = File::open(archive_path)
         .with_context(|| format!("Failed to open archive: {}", archive_path.display()))?;
     let parsed = read_archive_footer(&mut archive_file)?;
+
+    if parsed.is_folder {
+        let in_mmap = unsafe { Mmap::map(&archive_file)? };
+        let queue_cap = (rayon::current_num_threads() * 2).max(4);
+        let (tx, rx) = bounded::<Result<(usize, Vec<u8>)>>(queue_cap);
+        let progress = ProgressBar::new("Decompressing", parsed.orig_size, show_progress);
+
+        std::thread::scope(|s| -> Result<()> {
+            let block_meta = &parsed.block_meta;
+            let orig_size = parsed.orig_size as usize;
+            let chunk_size = parsed.chunk_size;
+            let algo = parsed.algo;
+            let in_mmap_ref = &in_mmap;
+
+            s.spawn(move || {
+                block_meta.par_iter().enumerate().for_each_with(
+                    tx,
+                    |sender, (i, &(offset, comp_size, expected_hash))| {
+                        let res = (|| -> Result<(usize, Vec<u8>)> {
+                            let end_offset = offset
+                                .checked_add(comp_size)
+                                .filter(|&end| end <= in_mmap_ref.len())
+                                .context("Compressed block offset out of bounds")?;
+                            let compressed_slice = &in_mmap_ref[offset..end_offset];
+
+                            let expected_uncomp_len = if (i + 1) * chunk_size > orig_size {
+                                orig_size.saturating_sub(i * chunk_size)
+                            } else {
+                                chunk_size
+                            };
+                            let mut out_buf = vec![0u8; expected_uncomp_len];
+                            decompress_chunk_into(compressed_slice, &mut out_buf, algo)?;
+
+                            let actual_hash = xxh3_64(&out_buf);
+                            if actual_hash != expected_hash {
+                                bail!("Block {} failed XXH3 checksum verification!", i);
+                            }
+                            Ok((i, out_buf))
+                        })();
+                        let _ = sender.send(res);
+                    },
+                );
+            });
+
+            let mut reader = ParallelBlockReader {
+                rx,
+                reorder: BTreeMap::new(),
+                next_idx: 0,
+                current_buf: Vec::new(),
+                current_pos: 0,
+                progress,
+            };
+            unpack_folder_stream(&mut reader, output_path)?;
+            reader.progress.finish();
+            Ok(())
+        })?;
+
+        drop(in_mmap);
+        return Ok(());
+    }
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {

@@ -75,3 +75,23 @@ pub fn resolve_decompress_destination(archive_path: &Path, dest: &Path) -> Resul
         Ok(dest.to_path_buf())
     }
 }
+
+pub fn clean_input_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim().trim_matches('\'').trim_matches('"');
+    let unescaped = trimmed.replace("\\ ", " ");
+    if let Some(rest) = unescaped.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(unescaped)
+}
+
+pub fn is_nolo_archive(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("nolo"))
+            .unwrap_or(false)
+}

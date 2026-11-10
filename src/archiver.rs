@@ -37,6 +37,7 @@ pub fn compress_file_with_progress(
         .with_context(|| format!("Failed to open input file: {}", input_path.display()))?;
     let file_size = in_file.metadata()?.len();
 
+    // Cross-platform path normalization: store purely as a UTF-8 .file_name() without directory prefixes
     let file_name = input_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -45,22 +46,29 @@ pub fn compress_file_with_progress(
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create destination folder: {}", parent.display())
+            })?;
         }
     }
 
-    let out_file = File::create(output_path)?;
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create output archive: {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
+
+    // 1. Write Start Magic
     writer.write_all(START_MAGIC)?;
 
     let mut block_table: Vec<BlockEntry> = Vec::new();
     let progress = ProgressBar::new("Compressing", file_size, show_progress);
 
+    // Cross-platform safety: Only memory-map if file_size > 0
     if file_size > 0 {
         let mmap = unsafe { Mmap::map(&in_file).context("Failed to memory-map input file")? };
         let num_blocks = mmap.len().div_ceil(chunk_size);
         block_table.reserve(num_blocks);
 
+        // Bounded channel limits memory usage to (2 * CPU cores) blocks in flight
         let queue_cap = (rayon::current_num_threads() * 2).max(4);
         let (tx, rx) = bounded::<Result<CompressedBlock>>(queue_cap);
 
@@ -99,6 +107,9 @@ pub fn compress_file_with_progress(
             }
             Ok(())
         })?;
+
+        // Explicitly drop Mmap before closing in_file for Windows file-locking compatibility
+        drop(mmap);
     }
 
     write_nolo_footer(
@@ -110,5 +121,6 @@ pub fn compress_file_with_progress(
         &block_table,
     )?;
     progress.finish();
+
     Ok(())
 }

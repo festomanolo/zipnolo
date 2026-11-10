@@ -17,6 +17,10 @@ fn main() -> Result<()> {
     }
 
     match args[0].as_str() {
+        "-v" | "--version" | "version" => {
+            println!("zipnolo v0.2.0 — Created by festomanolo (https://festomanolo.com)");
+            Ok(())
+        }
         "-h" | "--help" | "help" => {
             print_usage();
             Ok(())

@@ -199,10 +199,10 @@ pub fn interactive_navigator(start_dir: &Path, mode: BrowseMode, title: &str) ->
                 cursor::MoveTo(0, 0),
                 SetForegroundColor(Color::Cyan),
                 Print(format!(
-                    "=== ZIPNOLO v0.2.0 ({} CPU threads) — {} ===\r\n",
-                    rayon::current_num_threads(),
-                    title
+                    "=== ZIPNOLO v0.2.0 ({} CPU threads) — Created by festomanolo (https://festomanolo.com) ===\r\n",
+                    rayon::current_num_threads()
                 )),
+                Print(format!("    {}\r\n", title)),
                 ResetColor,
                 SetForegroundColor(Color::Yellow),
                 Print(format!("📂 Location: {}\r\n", current_dir.display())),

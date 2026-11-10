@@ -185,7 +185,8 @@ pub fn run_self_test() -> Result<()> {
 
 pub fn print_usage() {
     println!(
-        "zipnolo v0.2.0 — High-Ratio Lossless Block-Parallel Archiver for Linux, macOS & Windows ({} CPU threads)
+        "zipnolo v0.2.0 — High-Ratio Lossless Block-Parallel Archiver ({} CPU threads)
+Created by festomanolo (https://festomanolo.com) | https://github.com/festomanolo/zipnolo
 
 USAGE:
   1. Interactive File/Folder Browser ({} to compress selected file/folder, default dest = same dir):

@@ -2,6 +2,14 @@
 name = "zipnolo"
 version = "0.2.0"
 edition = "2021"
+authors = ["festomanolo <https://festomanolo.com>"]
+description = "High-ratio lossless block-parallel file and folder archiver for Linux, macOS, and Windows — by festomanolo (https://festomanolo.com)"
+homepage = "https://festomanolo.com"
+repository = "https://github.com/festomanolo/zipnolo"
+license = "MIT"
+readme = "README.md"
+keywords = ["compression", "archiver", "parallel", "brotli", "cli"]
+categories = ["command-line-utilities", "compression"]
 
 [[bin]]
 name = "zipnolo"

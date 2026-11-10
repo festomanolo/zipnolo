@@ -1,6 +1,6 @@
 [package]
 name = "zipnolo"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["festomanolo <https://festomanolo.com>"]
 description = "High-ratio lossless block-parallel file and folder archiver for Linux, macOS, and Windows — by festomanolo (https://festomanolo.com)"

@@ -37,6 +37,60 @@ pub fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn ensure_dir_writable(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::symlink_metadata(dir) {
+            if meta.is_dir() {
+                let mode = meta.permissions().mode();
+                if (mode & 0o700) != 0o700 {
+                    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o700));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(meta) = fs::symlink_metadata(dir) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(dir, perms);
+            }
+        }
+    }
+}
+
+/// Ensures an existing read-only file (such as `.git/objects/*` with mode `0o444`)
+/// or existing symlink at `path` is unlinked or made writable before creating a new file.
+pub fn prepare_overwrite_path(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_dir_writable(parent);
+        }
+    }
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.is_dir() {
+            ensure_dir_writable(path);
+            let _ = fs::remove_dir_all(path);
+        } else if fs::remove_file(path).is_err() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+            }
+            #[cfg(not(unix))]
+            {
+                let mut perms = meta.permissions();
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(path, perms);
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 use anyhow::Context;
 
 pub fn collect_folder_items(
@@ -155,6 +209,7 @@ pub fn compress_folder_with_progress(
         total_stream_size += 1 + 4 + (item.rel_path.len() as u64) + 8 + item.file_size;
     }
 
+    prepare_overwrite_path(output_path);
     let out_file = File::create(output_path)
         .with_context(|| format!("Failed to create output archive: {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
@@ -336,7 +391,18 @@ impl Read for ParallelBlockReader {
 }
 
 pub fn unpack_folder_stream(reader: &mut impl Read, target_folder: &Path) -> Result<()> {
-    fs::create_dir_all(target_folder)?;
+    if let Ok(meta) = fs::symlink_metadata(target_folder) {
+        if !meta.is_dir() {
+            prepare_overwrite_path(target_folder);
+        }
+    }
+    fs::create_dir_all(target_folder).with_context(|| {
+        format!(
+            "Failed to create target directory: {}",
+            target_folder.display()
+        )
+    })?;
+    ensure_dir_writable(target_folder);
 
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic)?;
@@ -375,12 +441,28 @@ pub fn unpack_folder_stream(reader: &mut impl Read, target_folder: &Path) -> Res
         let file_size = u64::from_le_bytes(size_bytes);
 
         if kind[0] == 0 {
-            fs::create_dir_all(&full_out)?;
+            if let Ok(meta) = fs::symlink_metadata(&full_out) {
+                if !meta.is_dir() {
+                    prepare_overwrite_path(&full_out);
+                }
+            }
+            fs::create_dir_all(&full_out).with_context(|| {
+                format!("Failed to create directory: {}", full_out.display())
+            })?;
+            ensure_dir_writable(&full_out);
         } else {
             if let Some(parent) = full_out.parent() {
-                fs::create_dir_all(parent)?;
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create parent directory: {}", parent.display())
+                    })?;
+                    ensure_dir_writable(parent);
+                }
             }
-            let out_f = File::create(&full_out)?;
+            prepare_overwrite_path(&full_out);
+            let out_f = File::create(&full_out).with_context(|| {
+                format!("Failed to create extracted file: {}", full_out.display())
+            })?;
             let mut writer = BufWriter::with_capacity(256 * 1024, out_f);
             let mut remaining = file_size;
             while remaining > 0 {

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "zipnolo"
-version = "0.2.0"
+version = "0.2.1"
 description = "High-ratio lossless block-parallel file and folder archiver for Linux, macOS, and Windows — Created by festomanolo (https://festomanolo.com)"
 readme = "README.md"
 requires-python = ">=3.8"

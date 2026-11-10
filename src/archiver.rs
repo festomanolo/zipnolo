@@ -1,7 +1,7 @@
 use crate::algorithm::Algorithm;
 use crate::codec::{compress_chunk, decompress_chunk_into};
 use crate::constants::START_MAGIC;
-use crate::folder::{unpack_folder_stream, ParallelBlockReader};
+use crate::folder::{prepare_overwrite_path, unpack_folder_stream, ParallelBlockReader};
 use crate::format::{read_archive_footer, write_nolo_footer, BlockEntry, CompressedBlock};
 use crate::progress::ProgressBar;
 use anyhow::{bail, Context, Result};
@@ -52,6 +52,7 @@ pub fn compress_file_with_progress(
         }
     }
 
+    prepare_overwrite_path(output_path);
     let out_file = File::create(output_path)
         .with_context(|| format!("Failed to create output archive: {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
@@ -201,6 +202,7 @@ pub fn decompress_file_with_progress(
         }
     }
 
+    prepare_overwrite_path(output_path);
     let out_file = OpenOptions::new()
         .read(true)
         .write(true)

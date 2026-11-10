@@ -203,3 +203,43 @@ fn test_folder_compress_and_decompress_roundtrip() -> Result<()> {
     let _ = fs::remove_dir_all(&base_dir);
     Ok(())
 }
+
+#[test]
+fn test_folder_decompress_overwrites_readonly_git_objects() -> Result<()> {
+    let base_dir = std::env::temp_dir().join("zipnolo_readonly_git_test");
+    let src_folder = base_dir.join("cheza_repo");
+    let git_obj_dir = src_folder.join(".git").join("objects").join("59");
+
+    let _ = fs::remove_dir_all(&base_dir);
+    fs::create_dir_all(&git_obj_dir)?;
+
+    let readonly_file = git_obj_dir.join("ee2b6e965e1ccab1a9c17eca1c3e0b30579fff");
+    let obj_payload = b"git pack/object immutable content 0o444".to_vec();
+    fs::write(&readonly_file, &obj_payload)?;
+
+    // Mark file read-only (0o444 on Unix, readonly=true on Windows) just like Git objects
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&readonly_file, fs::Permissions::from_mode(0o444))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut perms = fs::metadata(&readonly_file)?.permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&readonly_file, perms)?;
+    }
+
+    let same_dir = default_same_dir(&src_folder);
+    let archive_path = resolve_compress_destination(&src_folder, &same_dir)?;
+    compress_folder_with_progress(&src_folder, &archive_path, Algorithm::Brotli, 64 * 1024, false)?;
+
+    // Decompress directly into the SAME directory where `cheza_repo` and its 0o444 `.git/objects` already exist
+    let restored_folder = resolve_decompress_destination(&archive_path, &same_dir)?;
+    decompress_file_with_progress(&archive_path, &restored_folder, false)?;
+
+    assert_eq!(fs::read(&readonly_file)?, obj_payload);
+
+    let _ = fs::remove_dir_all(&base_dir);
+    Ok(())
+}

@@ -4,6 +4,8 @@ use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression as FlateCompress
 use std::io::{Read, Write};
 
 /// Compresses a single block using pure-Rust Brotli, Zlib, LZ4, or Snappy.
+/// Guarantees zero block expansion: if the compressed output is >= the original chunk size
+/// (e.g. random or pre-compressed data), stores the raw uncompressed block directly.
 pub fn compress_chunk(chunk: &[u8], algo: Algorithm) -> Result<Vec<u8>> {
     if chunk.is_empty() {
         return Ok(Vec::new());
@@ -12,8 +14,9 @@ pub fn compress_chunk(chunk: &[u8], algo: Algorithm) -> Result<Vec<u8>> {
     let compressed = match algo {
         Algorithm::Brotli => {
             let mut out = Vec::with_capacity(chunk.len() / 2 + 64);
+            // Quality 11 for chunks <= 512 KB, Quality 9 for multi-MB chunks for optimal density/throughput
             let quality: u32 = if chunk.len() <= 512 * 1024 { 11 } else { 9 };
-            let lgwin: u32 = 22;
+            let lgwin: u32 = 22; // 4 MB sliding window
             {
                 let mut writer = brotli::CompressorWriter::new(&mut out, 64 * 1024, quality, lgwin);
                 writer.write_all(chunk)?;
@@ -36,11 +39,22 @@ pub fn compress_chunk(chunk: &[u8], algo: Algorithm) -> Result<Vec<u8>> {
         }
     };
 
-    Ok(compressed)
+    // Raw block bypass: never allow an incompressible block to expand
+    if compressed.len() >= chunk.len() {
+        Ok(chunk.to_vec())
+    } else {
+        Ok(compressed)
+    }
 }
 
 /// Decompresses a single block directly into the pre-allocated output slice.
+/// Automatically detects raw-bypassed incompressible blocks when `compressed.len() == out_slice.len()`.
 pub fn decompress_chunk_into(compressed: &[u8], out_slice: &mut [u8], algo: Algorithm) -> Result<()> {
+    if compressed.len() == out_slice.len() {
+        out_slice.copy_from_slice(compressed);
+        return Ok(());
+    }
+
     match algo {
         Algorithm::Brotli => {
             let mut reader = brotli::Decompressor::new(compressed, 64 * 1024);

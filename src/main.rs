@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use zipnolo::cli::{
-    execute_compress_flow, execute_decompress_flow, print_usage, run_interactive_from,
-    run_self_test,
+    execute_compress_flow, execute_decompress_flow, execute_info_flow, print_usage,
+    run_interactive_from, run_self_test,
 };
 use zipnolo::{
     clean_input_path, default_same_dir, is_nolo_archive, Algorithm, DEFAULT_CHUNK_SIZE,
@@ -17,8 +17,11 @@ fn main() -> Result<()> {
     }
 
     match args[0].as_str() {
-        "-v" | "--version" | "version" => {
-            println!("zipnolo v0.2.0 — Created by festomanolo (https://festomanolo.com)");
+        "-v" | "-V" | "--version" | "version" => {
+            println!(
+                "zipnolo v{} — Created by festomanolo (https://festomanolo.com)",
+                env!("CARGO_PKG_VERSION")
+            );
             Ok(())
         }
         "-h" | "--help" | "help" => {
@@ -86,6 +89,17 @@ fn main() -> Result<()> {
                 default_same_dir(&archive_path)
             };
             execute_decompress_flow(&archive_path, &final_dest)
+        }
+        "info" | "i" => {
+            if args.len() < 2 {
+                print_usage();
+                bail!("Usage: zipnolo info <ARCHIVE.nolo>");
+            }
+            let archive_path = clean_input_path(&args[1]);
+            if !archive_path.is_file() {
+                bail!("Archive file not found: {}", archive_path.display());
+            }
+            execute_info_flow(&archive_path)
         }
         first_arg => {
             let path = clean_input_path(first_arg);

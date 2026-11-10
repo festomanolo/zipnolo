@@ -86,6 +86,47 @@ pub fn execute_decompress_flow(archive_path: &Path, dest_dir: &Path) -> Result<(
     Ok(())
 }
 
+pub fn execute_info_flow(archive_path: &Path) -> Result<()> {
+    let mut archive_file = File::open(archive_path)?;
+    let comp_len = archive_file.metadata()?.len();
+    let footer = read_archive_footer(&mut archive_file)?;
+
+    let ratio = if footer.orig_size > 0 {
+        (comp_len as f64 / footer.orig_size as f64) * 100.0
+    } else {
+        100.0
+    };
+    let saved_pct = (100.0 - ratio).max(0.0);
+
+    println!("==========================================================");
+    println!("  NOLO v1 Archive Metadata — {}", archive_path.display());
+    println!("==========================================================");
+    println!("  Stored Name     : {}", footer.stored_name);
+    println!(
+        "  Container Type  : {}",
+        if footer.is_folder {
+            "Folder Container (NLDR stream)"
+        } else {
+            "Single File"
+        }
+    );
+    println!("  Algorithm       : {}", footer.algo.name());
+    println!("  Original Size   : {}", format_bytes(footer.orig_size));
+    println!("  Archive Size    : {}", format_bytes(comp_len));
+    println!(
+        "  Compression     : {:.1}% of original ({:.1}% space saved)",
+        ratio, saved_pct
+    );
+    println!(
+        "  Block Geometry  : {} parallel blocks (chunk size: {})",
+        footer.block_meta.len(),
+        format_bytes(footer.chunk_size as u64)
+    );
+    println!("  Integrity       : 64-bit XXH3 checksum per block");
+    println!("==========================================================");
+    Ok(())
+}
+
 pub fn run_interactive_from(start_dir: &Path) -> Result<()> {
     let selected_path = interactive_navigator(
         start_dir,
@@ -185,7 +226,7 @@ pub fn run_self_test() -> Result<()> {
 
 pub fn print_usage() {
     println!(
-        "zipnolo v0.2.1 — High-Ratio Lossless Block-Parallel Archiver ({} CPU threads)
+        "zipnolo v{} — High-Ratio Lossless Block-Parallel Archiver ({} CPU threads)
 Created by festomanolo (https://festomanolo.com) | https://github.com/festomanolo/zipnolo
 
 USAGE:
@@ -198,11 +239,15 @@ USAGE:
   3. Decompress a .nolo Archive (restores file or folder into same directory by default):
      zipnolo decompress <ARCHIVE.nolo> [DEST_FOLDER]
 
-  4. Quick One-Command Compress / Decompress to Same Directory:
+  4. Inspect .nolo Archive Metadata in O(1) without extracting:
+     zipnolo info <ARCHIVE.nolo>
+
+  5. Quick One-Command Compress / Decompress to Same Directory:
      zipnolo <FILE_OR_ARCHIVE>
 
-  5. Run built-in 32 MB verification benchmark:
+  6. Run built-in 32 MB verification benchmark:
      zipnolo test",
+        env!("CARGO_PKG_VERSION"),
         rayon::current_num_threads(),
         COMPRESS_KEY_LABEL
     );
